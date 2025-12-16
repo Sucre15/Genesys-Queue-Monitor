@@ -229,7 +229,9 @@
     // NOUVEAU : Hors ligne détecté
     if (classes.includes('offline') || text.includes('hors ligne') || text.includes('déconnecté'))
       return 'Offline';
-    if (text.includes('non occupé') || text.includes('inactif') || text.includes('idle'))
+    // DÉTECTION "NON OCCUPÉ" AMÉLIORÉE
+    if (text.includes('non occupé') || text.includes('non occupe') || text.includes('non-occupé') || 
+        text.includes('non occupe') || text.includes('inactif') || text.includes('idle'))
       return 'Idle';
     if (text.includes('sans réponse') || text.includes('not responding'))
       return 'Not Responding';
@@ -246,7 +248,8 @@
     if (/\b(interaction|interacting|en cours d'interaction|en cours de communication)\b/.test(t)) return 'On Call';
     if (/\b(file d'attente|en\s*file|on\s*queue)\b/.test(t)) return 'On Queue';
     if (/\b(tâche associée|tache associee|associated task|work item)\b/.test(t)) return 'Associated Task';
-    if (/\b(non occupé|inactif|idle)\b/.test(t)) return 'Idle';
+    // DÉTECTION "NON OCCUPÉ" AMÉLIORÉE
+    if (/\b(non[\s\-]?occupé|non[\s\-]?ocupe|inactif|idle)\b/.test(t)) return 'Idle';
     // NOUVEAU : Hors ligne
     if (/\b(hors ligne|offline|déconnecté)\b/.test(t)) return 'Offline';
 
@@ -644,6 +647,16 @@
           const isOffline = statusText.includes('Hors ligne') || 
                            statusClass.includes('Offline');
 
+          // DÉTECTION SPÉCIFIQUE POUR "NON OCCUPÉ"
+          const isNonOccupe = statusText.includes('Non occupé') || 
+                             statusText.includes('Non occupe') ||
+                             statusText.includes('Non-occupé') ||
+                             statusText.includes('non occupé') ||
+                             statusText.includes('non occupe') ||
+                             statusText.includes('non-occupé') ||
+                             statusText.includes('Inactif') ||
+                             statusText.includes('inactif');
+
           const agent = {
             id: 'widget_' + norm(name),
             name,
@@ -664,7 +677,8 @@
             // Champs pour détection spéciale
             isTacheAssociee: isTacheAssociee,
             isOccupied: isOccupied,
-            isOffline: isOffline  // NOUVEAU
+            isOffline: isOffline,
+            isNonOccupe: isNonOccupe  // NOUVEAU : flag spécifique
           };
 
           // FILTRE : Ne pas ajouter les agents "Hors ligne"
@@ -681,7 +695,7 @@
     return agents;
   }
 
-  // ===================== MAPPAGE STATUT → SECTION (CORRIGÉ) =====================
+  // ===================== MAPPAGE STATUT → SECTION (CORRIGÉ - VERSION FORCE) =====================
   function deriveStatusKey(agent) {
     const raw = agent.status || agent.statusClass || '';
     const st = raw.toLowerCase();
@@ -690,16 +704,30 @@
     const onQ = !!agent.onQueue;
     const cnt = agent.activityCount || 0;
     
-    // NOUVEAU : Vérifie d'abord si l'agent est "Occupé"
+    // 1) D'abord les statuts les plus importants
     if (agent.isOccupied) return 'occupe';
-    
-    // Vérifie ensuite si l'agent a explicitement le flag isTacheAssociee
     if (agent.isTacheAssociee) return 'tache';
+    
+    // 2) "NON OCCUPÉ" en PRIORITÉ ABSOLUE - avec toutes les variantes possibles
+    if (agent.isNonOccupe || 
+        st.includes('non occupé') || 
+        st.includes('non occupe') ||
+        st.includes('non-occupé') ||
+        st.includes('non-ocupe') ||
+        st.includes('inactif') ||
+        st.includes('idle') ||
+        noacc.includes('non occupe') ||
+        noacc.includes('non occupe') ||
+        raw.includes('Non occupé') ||
+        raw.includes('Non occupe') ||
+        raw.includes('Inactif')) {
+      return 'queue_free';
+    }
 
-    // Prohibés en premier
+    // 3) Prohibés
     if (isRonaStatus(raw) || isPostcallStatus(raw)) return 'prohib';
 
-    // Statuts textuels qui doivent DOMINER l'auto-détection
+    // 4) Statuts textuels qui doivent DOMINER l'auto-détection
     if (
       st.includes('tâche') || st.includes('tache') ||
       noacc.includes('tache associee') ||
@@ -707,14 +735,10 @@
       st.includes('associated task')
     ) return 'tache';
 
-    // CORRECTION : "Occupé" va dans la nouvelle section
+    // 5) "Occupé"
     if (st.includes('occupé') || st.includes('busy')) return 'occupe';
 
-    // CORRECTION IMPORTANTE : "Non occupé" va dans "En file d'attente"
-    // Cette condition doit être AVANT "disponible" mais APRÈS les statuts prioritaires
-    if (st.includes('non occupé') || st.includes('inactif') || st.includes('idle'))
-      return 'queue_free';
-
+    // 6) Autres statuts spécifiques
     if (
       st.includes('non télé') || st.includes('non-télé') ||
       noacc.includes('non telecontact') || noacc.includes('non-telecontact') ||
@@ -727,19 +751,19 @@
     if (st.includes('formation') || st.includes('training')) return 'formation';
     if (st.includes('travaux pay')) return 'travaux';
 
-    // Digital / voix
+    // 7) Digital / voix
     if (ch.chat) return 'en_chat';
 
-    // Voix uniquement si Genesys nous indique explicitement un appel
+    // 8) Voix uniquement si Genesys nous indique explicitement un appel
     // ET que ce n'est PAS une tâche associée OU Occupé
     if (!agent.isTacheAssociee && !agent.isOccupied && 
         (ch.call || agent.statusClass === 'On Call' || 
         st.includes('interaction') || st.includes('en cours d\'interaction'))) return 'en_call';
 
-    // File sans interaction
+    // 9) File sans interaction
     if (onQ && cnt === 0) return 'queue_free';
 
-    // Disponibles / interactions hors file
+    // 10) Disponibles / interactions hors file
     if (!onQ && cnt > 0) return 'interaction_hf';
     if (!onQ && (st.includes('available') || st.includes('disponible'))) return 'disponible';
 
