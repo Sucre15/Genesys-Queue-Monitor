@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Genesys Queue Monitor v2.2
+// @name         Genesys Queue Monitor (v2.2 - Dashboard Widget)
 // @namespace    http://tampermonkey.net/
 // @version      2.2
 // @description  Dashboard flottant Genesys Cloud basé sur le widget AGENT_STATUS
@@ -211,8 +211,10 @@
       ? String(statusElement.className).toLowerCase()
       : '');
 
-    if (classes.includes('interacting') || text.includes('interaction') || text.includes('en cours d\'interaction') || text.includes('en cours de communication')) return 'On Call';
-    if (classes.includes('busy') || text.includes('occupé')) return 'Busy';
+    // CORRECTION : "Occupé" est différent de "En appel"
+    if (text.includes('occupé') || text.includes('busy')) return 'Busy';
+    if (text.includes('interaction') || text.includes('en cours d\'interaction') || text.includes('en cours de communication')) return 'On Call';
+    if (text.includes('tâche associée') || text.includes('associated task') || text.includes('tâche')) return 'Associated Task';
     if (classes.includes('meal') || text.includes('repas')) return 'Meal';
     if (classes.includes('break') || text.includes('pause')) return 'Break';
     if (classes.includes('meeting') || text.includes('réunion')) return 'Meeting';
@@ -224,12 +226,11 @@
       return 'On Queue';
     if (classes.includes('on_call') || classes.includes('on-call') || text.includes('en appel'))
       return 'On Call';
+    // NOUVEAU : Hors ligne détecté
     if (classes.includes('offline') || text.includes('hors ligne') || text.includes('déconnecté'))
       return 'Offline';
     if (classes.includes('idle') || text.includes('non occupé') || text.includes('inactif'))
       return 'Idle';
-    if (text.includes('tâche associée') || text.includes('associated task') || text.includes('tâche'))
-      return 'Associated Task';
     if (text.includes('sans réponse') || text.includes('not responding'))
       return 'Not Responding';
 
@@ -240,20 +241,25 @@
     const t = (explicitText || '').toLowerCase();
 
     // 0) Le texte domine
+    // CORRECTION : "Occupé" ≠ "En appel"
+    if (/\b(occupé|busy)\b/.test(t)) return 'Busy';
     if (/\b(interaction|interacting|en cours d'interaction|en cours de communication)\b/.test(t)) return 'On Call';
     if (/\b(file d'attente|en\s*file|on\s*queue)\b/.test(t)) return 'On Queue';
     if (/\b(tâche associée|tache associee|associated task|work item)\b/.test(t)) return 'Associated Task';
     if (/\b(non occupé|inactif|idle)\b/.test(t)) return 'Idle';
+    // NOUVEAU : Hors ligne
+    if (/\b(hors ligne|offline|déconnecté)\b/.test(t)) return 'Offline';
 
     // 1) Sinon, on regarde les classes du rond
     if (!dot) return getStatusClassFromWidget(null, explicitText);
     const classes = String(dot.className).toLowerCase();
 
-    if (classes.includes('busy') || classes.includes('interacting') || classes.includes('on_call')) return 'On Call';
+    if (classes.includes('busy')) return 'Busy'; // CORRECTION : "busy" = "Occupé", pas "En call"
+    if (classes.includes('interacting') || classes.includes('on_call')) return 'On Call';
     if (classes.includes('on_queue')) return 'On Queue';
     if (classes.includes('available')) return 'Available';
     if (classes.includes('away')) return 'Away';
-    if (classes.includes('offline')) return 'Offline';
+    if (classes.includes('offline')) return 'Offline'; // NOUVEAU
     if (classes.includes('idle')) return 'Idle';
     if (classes.includes('break')) return 'Break';
 
@@ -286,7 +292,7 @@
     return '';
   }
 
-  // ===================== SECTIONS (v1 conservées) =====================
+  // ===================== SECTIONS (AJOUT DE "OCCUPÉ" et EXCLUSION "HORS LIGNE") =====================
   const SECTION_DEFS = [
     { key: 'favoris',          label: 'Favoris' },
     { key: 'prohib',           label: 'Statut prohibé' },
@@ -295,6 +301,7 @@
     { key: 'en_call',          label: 'En call' },
     { key: 'en_chat',          label: 'En chat' },
     { key: 'tache',            label: 'Tâche associée' },
+    { key: 'occupe',           label: 'Occupé' }, // NOUVELLE SECTION
     { key: 'non_telecontact',  label: 'Non télécontact' },
     { key: 'travaux',          label: 'Travaux payants' },
     { key: 'pause',            label: 'Pause' },
@@ -428,7 +435,17 @@
   // ===================== CONNECTED USERS =====================
   class ConnectedUsersManager {
     static updateConnectedUsers(agents) {
-      const names = agents.map(a => a.name).filter(Boolean);
+      // FILTRE : Ne garde que les agents qui ne sont PAS "Hors ligne"
+      const onlineAgents = agents.filter(agent => {
+        const statusText = agent.status || '';
+        const statusClass = agent.statusClass || '';
+        const isOffline = statusText.includes('Hors ligne') || 
+                         statusClass.includes('Offline') ||
+                         statusText.includes('Hors ligne');
+        return !isOffline;
+      });
+      
+      const names = onlineAgents.map(a => a.name).filter(Boolean);
       const unique = Array.from(new Set(names));
       unique.forEach(n => SlotManager.assignSlot(n));
 
@@ -615,11 +632,17 @@
           
           const statusClass = getStatusClassFromDot(dot, statusText);
 
-          // Si c'est une tâche associée, on ne met PAS activityCount à 1
-          const isInteracting = !isTacheAssociee && 
-                               (statusClass === 'On Call' || 
-                                statusText.includes('En cours d\'interaction') ||
+          // CORRECTION : "Occupé" n'est PAS un appel
+          const isOccupied = statusText.includes('Occupé') || statusClass === 'Busy';
+          
+          // "En cours d'interaction" ou "En cours de communication" = vrai appel
+          const isInteracting = !isTacheAssociee && !isOccupied &&
+                               (statusText.includes('En cours d\'interaction') ||
                                 statusText.includes('En cours de communication'));
+
+          // NOUVEAU : Vérifie si l'agent est "Hors ligne"
+          const isOffline = statusText.includes('Hors ligne') || 
+                           statusClass.includes('Offline');
 
           const agent = {
             id: 'widget_' + norm(name),
@@ -629,21 +652,26 @@
             activityCount: isInteracting ? 1 : 0,
             onQueue: statusText.includes('En file d\'attente') || statusClass === 'On Queue',
             channel: {
-              call: isInteracting && !isTacheAssociee,  // Pas de call si AT
+              call: isInteracting && !isTacheAssociee && !isOccupied,  // Pas de call si AT ou Occupé
               chat: false,
               email: false,
               sms: false,
-              task: isTacheAssociee,  // Marque comme tâche
+              task: isTacheAssociee,
               chatCount: 0
             },
             rowElement: row,
             timestamp: Date.now(),
-            // Nouveau champ pour indiquer explicitement AT
-            isTacheAssociee: isTacheAssociee
+            // Champs pour détection spéciale
+            isTacheAssociee: isTacheAssociee,
+            isOccupied: isOccupied,
+            isOffline: isOffline  // NOUVEAU
           };
 
-          seen.add(name);
-          agents.push(agent);
+          // FILTRE : Ne pas ajouter les agents "Hors ligne"
+          if (!isOffline) {
+            seen.add(name);
+            agents.push(agent);
+          }
         } catch (e) {
           log.error('Erreur extraction agent widget:', e);
         }
@@ -662,7 +690,10 @@
     const onQ = !!agent.onQueue;
     const cnt = agent.activityCount || 0;
     
-    // NOUVEAU : Vérifie d'abord si l'agent a explicitement le flag isTacheAssociee
+    // NOUVEAU : Vérifie d'abord si l'agent est "Occupé"
+    if (agent.isOccupied) return 'occupe';
+    
+    // Vérifie ensuite si l'agent a explicitement le flag isTacheAssociee
     if (agent.isTacheAssociee) return 'tache';
 
     // Prohibés en premier
@@ -675,6 +706,9 @@
       st.includes('work item') || st.includes('workitem') ||
       st.includes('associated task')
     ) return 'tache';
+
+    // CORRECTION : "Occupé" va dans la nouvelle section
+    if (st.includes('occupé') || st.includes('busy')) return 'occupe';
 
     if (
       st.includes('non télé') || st.includes('non-télé') ||
@@ -692,8 +726,9 @@
     if (ch.chat) return 'en_chat';
 
     // Voix uniquement si Genesys nous indique explicitement un appel
-    // ET que ce n'est PAS une tâche associée
-    if (!agent.isTacheAssociee && (ch.call || agent.statusClass === 'On Call' || 
+    // ET que ce n'est PAS une tâche associée OU Occupé
+    if (!agent.isTacheAssociee && !agent.isOccupied && 
+        (ch.call || agent.statusClass === 'On Call' || 
         st.includes('interaction') || st.includes('en cours d\'interaction'))) return 'en_call';
 
     // File sans interaction
@@ -829,7 +864,8 @@
       onQueue: agents.filter(a => a.onQueue).length,
       longestCall: { name: '', ms: 0 },
       longestChat: { name: '', ms: 0 },
-      prohibCount: 0
+      prohibCount: 0,
+      occupeCount: 0
     };
 
     for (const a of agents) {
@@ -845,7 +881,9 @@
           res.longestChat = { name: a.name, ms };
         }
       }
-      if (deriveStatusKey(a) === 'prohib') res.prohibCount++;
+      const key = deriveStatusKey(a);
+      if (key === 'prohib') res.prohibCount++;
+      if (key === 'occupe') res.occupeCount++;
     }
 
     return res;
@@ -1218,7 +1256,7 @@
         'gap:8px;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:1;">' +
         '<div style="display:flex;align-items:center;gap:8px;min-width:0;">' +
           '<span>📊</span>' +
-          '<div style="font-weight:700;white-space:nowrap;">Queue Monitor v2.1 (Widget)</div>' +
+          '<div style="font-weight:700;white-space:nowrap;">Queue Monitor v2.2 (Widget)</div>' +
           '<div class="qm-nodrag" style="margin-left:8px;display:flex;gap:6px;align-items:center;">' +
             '<input id="qm-search" class="qm-nodrag" type="text" placeholder="Rechercher agent…" ' +
               'value="' + escapeHtml(searchFilter) + '" ' +
@@ -1290,11 +1328,12 @@
           (kpis.longestChat.name ? (kpis.longestChat.name + ' ' + toHMS(kpis.longestChat.ms)) : '—') +
         '</span>' +
         '<span class="kpi-chip">⛔ Prohibés ' + kpis.prohibCount + '</span>' +
+        '<span class="kpi-chip">🟤 Occupés ' + kpis.occupeCount + '</span>' +
       '</div>'
     );
   }
 
-  // Palette de couleurs par section
+  // Palette de couleurs par section (AJOUT DE "OCCUPÉ")
   const SECTION_STYLE = {
     default:         { bg:'#fefce8', border:'#f59e0b', dot:'🟡' },
     en_call:         { bg:'#dbeafe', border:'#3b82f6', dot:'🔵' },
@@ -1304,6 +1343,7 @@
     prohib:          { bg:'#fee2e2', border:'#dc2626', dot:'⛔' },
     en_chat:         { bg:'#ede9fe', border:'#7c3aed', dot:'🟣' },
     tache:           { bg:'#fff7ed', border:'#fb923c', dot:'🟠' },
+    occupe:          { bg:'#ffedd5', border:'#f97316', dot:'🟤' }, // NOUVELLE COULEUR POUR OCCUPÉ
     non_telecontact: { bg:'#ffe4e6', border:'#f43f5e', dot:'⚫' },
     travaux:         { bg:'#f5f5f4', border:'#92400e', dot:'🟤' },
     pause:           { bg:'#f1f5f9', border:'#64748b', dot:'☕' },
@@ -1696,6 +1736,7 @@
         renderSection('En call', groups.en_call || [], '🔵', 'en_call', true) +
         renderSection('En chat', groups.en_chat || [], '💬', 'en_chat', true) +
         renderSection('Tâche associée', groups.tache || [], '📌', 'tache', true) +
+        renderSection('Occupé', groups.occupe || [], '🟤', 'occupe', true) + // NOUVELLE SECTION
         renderSection('Non télécontact', groups.non_telecontact || [], '🚫', 'non_telecontact', true) +
         renderSection('Travaux payants', groups.travaux || [], '💼', 'travaux', true) +
         renderSection('Pause', groups.pause || [], '☕', 'pause', true) +
@@ -2035,22 +2076,23 @@
         agents = agents.filter(a => norm(a.name).includes(f));
       }
 
+      // CORRECTION : ConnectedUsersManager.updateConnectedUsers() filtre déjà les "Hors ligne"
       ConnectedUsersManager.updateConnectedUsers(agents);
 
       agents.forEach(agent => {
         const key = deriveStatusKey(agent);
         ensureStatusTimerOnly(key, agent.name);
         
-        // CORRECTION CRITIQUE : RÉINITIALISATION DES APPELS SI ON PASSE EN AT
-        if (key === 'tache' && lastInCall[agent.name]) {
-          // Si l'agent passe en AT alors qu'il était en call, on arrête le timer d'appel
+        // CORRECTION : Arrêt des timers d'appel si on passe en AT ou Occupé
+        if ((key === 'tache' || key === 'occupe') && lastInCall[agent.name]) {
+          // Si l'agent passe en AT ou Occupé alors qu'il était en call, on arrête le timer d'appel
           const dur = msSince(callStartAt[agent.name] || nowIso());
           aggAddMs(agent.name, 'callMs', dur);
           histAdd(agent.name, 'call_end', { durMs: dur });
           delete callStartAt[agent.name];
           lastInCall[agent.name] = false;
           callOffStreak[agent.name] = 0;
-          log.debug('Appel arrêté pour', agent.name, 'passage en AT');
+          log.debug('Appel arrêté pour', agent.name, 'passage en ' + key);
         }
         
         // Aligne le timer de statut
@@ -2064,13 +2106,13 @@
           }
         }
 
-        // 1) Appels - UNIQUEMENT si ce n'est pas une AT
+        // 1) Appels - UNIQUEMENT si ce n'est pas une AT ou Occupé
         let inCall = false;
         let genesysSec = null;
         
         // Seulement pour les statuts qui peuvent vraiment avoir des appels
-        // ET qui ne sont pas en AT
-        if (key !== 'tache' && key !== 'prohib') {
+        // ET qui ne sont pas en AT ou Occupé
+        if (key !== 'tache' && key !== 'occupe' && key !== 'prohib') {
           const isInteracting = agent.statusClass === 'On Call' || 
                                agent.status.includes('En cours d\'interaction') ||
                                agent.status.includes('En cours de communication');
@@ -2123,6 +2165,7 @@
         en_call: [],
         en_chat: [],
         tache: [],
+        occupe: [], // NOUVELLE SECTION
         non_telecontact: [],
         travaux: [],
         pause: [],
