@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Genesys Queue Monitor v2.1
+// @name         Genesys Queue Monitor v2.2
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  Dashboard flottant Genesys Cloud basé sur le widget AGENT_STATUS
 // @author       Miloud Mostefa-Hanchour
 // @match        https://apps.mypurecloud.de/*
@@ -211,7 +211,7 @@
       ? String(statusElement.className).toLowerCase()
       : '');
 
-    if (classes.includes('interacting') || text.includes('interaction') || text.includes('en cours d\'interaction')) return 'On Call';
+    if (classes.includes('interacting') || text.includes('interaction') || text.includes('en cours d\'interaction') || text.includes('en cours de communication')) return 'On Call';
     if (classes.includes('busy') || text.includes('occupé')) return 'Busy';
     if (classes.includes('meal') || text.includes('repas')) return 'Meal';
     if (classes.includes('break') || text.includes('pause')) return 'Break';
@@ -228,7 +228,7 @@
       return 'Offline';
     if (classes.includes('idle') || text.includes('non occupé') || text.includes('inactif'))
       return 'Idle';
-    if (text.includes('tâche associée') || text.includes('associated task'))
+    if (text.includes('tâche associée') || text.includes('associated task') || text.includes('tâche'))
       return 'Associated Task';
     if (text.includes('sans réponse') || text.includes('not responding'))
       return 'Not Responding';
@@ -242,6 +242,7 @@
     // 0) Le texte domine
     if (/\b(interaction|interacting|en cours d'interaction|en cours de communication)\b/.test(t)) return 'On Call';
     if (/\b(file d'attente|en\s*file|on\s*queue)\b/.test(t)) return 'On Queue';
+    if (/\b(tâche associée|tache associee|associated task|work item)\b/.test(t)) return 'Associated Task';
     if (/\b(non occupé|inactif|idle)\b/.test(t)) return 'Idle';
 
     // 1) Sinon, on regarde les classes du rond
@@ -606,12 +607,19 @@
           const additionalLabel = statusCell ? statusCell.querySelector('.additional-label') : null;
           const statusText = additionalLabel ? (additionalLabel.textContent || '').trim() : '';
           
+          // CORRECTION CRITIQUE : Détection spécifique de "Tâche associée"
+          const isTacheAssociee = statusText.includes('Tâche associée') || 
+                                  statusText.includes('Tâche') || 
+                                  statusText.includes('Associated Task') ||
+                                  statusText.includes('Work item');
+          
           const statusClass = getStatusClassFromDot(dot, statusText);
 
-          // On essaie de détecter si l'agent est en interaction
-          const isInteracting = statusClass === 'On Call' || 
-                               statusText.includes('En cours d\'interaction') ||
-                               statusText.includes('En cours de communication');
+          // Si c'est une tâche associée, on ne met PAS activityCount à 1
+          const isInteracting = !isTacheAssociee && 
+                               (statusClass === 'On Call' || 
+                                statusText.includes('En cours d\'interaction') ||
+                                statusText.includes('En cours de communication'));
 
           const agent = {
             id: 'widget_' + norm(name),
@@ -621,15 +629,17 @@
             activityCount: isInteracting ? 1 : 0,
             onQueue: statusText.includes('En file d\'attente') || statusClass === 'On Queue',
             channel: {
-              call: isInteracting,
+              call: isInteracting && !isTacheAssociee,  // Pas de call si AT
               chat: false,
               email: false,
               sms: false,
-              task: false,
+              task: isTacheAssociee,  // Marque comme tâche
               chatCount: 0
             },
             rowElement: row,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            // Nouveau champ pour indiquer explicitement AT
+            isTacheAssociee: isTacheAssociee
           };
 
           seen.add(name);
@@ -651,6 +661,9 @@
     const ch = agent.channel || {};
     const onQ = !!agent.onQueue;
     const cnt = agent.activityCount || 0;
+    
+    // NOUVEAU : Vérifie d'abord si l'agent a explicitement le flag isTacheAssociee
+    if (agent.isTacheAssociee) return 'tache';
 
     // Prohibés en premier
     if (isRonaStatus(raw) || isPostcallStatus(raw)) return 'prohib';
@@ -679,8 +692,9 @@
     if (ch.chat) return 'en_chat';
 
     // Voix uniquement si Genesys nous indique explicitement un appel
-    if (ch.call || agent.statusClass === 'On Call' || 
-        st.includes('interaction') || st.includes('en cours d\'interaction')) return 'en_call';
+    // ET que ce n'est PAS une tâche associée
+    if (!agent.isTacheAssociee && (ch.call || agent.statusClass === 'On Call' || 
+        st.includes('interaction') || st.includes('en cours d\'interaction'))) return 'en_call';
 
     // File sans interaction
     if (onQ && cnt === 0) return 'queue_free';
@@ -2013,7 +2027,7 @@
         return;
       }
 
-      const agentsRaw = findAgentsInWidget(); // <- Utilise le widget
+      const agentsRaw = findAgentsInWidget();
       let agents = agentsRaw;
 
       if (searchFilter) {
@@ -2021,63 +2035,65 @@
         agents = agents.filter(a => norm(a.name).includes(f));
       }
 
-      // Mise à jour des slots & liste connectés
       ConnectedUsersManager.updateConnectedUsers(agents);
 
-      // Timers & statuts pour chaque agent
       agents.forEach(agent => {
         const key = deriveStatusKey(agent);
         ensureStatusTimerOnly(key, agent.name);
         
-        // Aligne le timer de statut pour TOUS les statuts sur la durée affichée par Genesys
-        {
-          const stSec = extractStatusDurationFromRow(agent.rowElement);
-          if (stSec != null) {
-            const desiredMs = stSec * 1000;
-            const curIso = statusStartAt[agent.name];
-            const drift = curIso ? desiredMs - msSince(curIso) : Infinity;
-            if (!curIso || Math.abs(drift) > 5000) {
-              statusStartAt[agent.name] = new Date(Date.now() - desiredMs).toISOString();
-            }
+        // CORRECTION CRITIQUE : RÉINITIALISATION DES APPELS SI ON PASSE EN AT
+        if (key === 'tache' && lastInCall[agent.name]) {
+          // Si l'agent passe en AT alors qu'il était en call, on arrête le timer d'appel
+          const dur = msSince(callStartAt[agent.name] || nowIso());
+          aggAddMs(agent.name, 'callMs', dur);
+          histAdd(agent.name, 'call_end', { durMs: dur });
+          delete callStartAt[agent.name];
+          lastInCall[agent.name] = false;
+          callOffStreak[agent.name] = 0;
+          log.debug('Appel arrêté pour', agent.name, 'passage en AT');
+        }
+        
+        // Aligne le timer de statut
+        const stSec = extractStatusDurationFromRow(agent.rowElement);
+        if (stSec != null) {
+          const desiredMs = stSec * 1000;
+          const curIso = statusStartAt[agent.name];
+          const drift = curIso ? desiredMs - msSince(curIso) : Infinity;
+          if (!curIso || Math.abs(drift) > 5000) {
+            statusStartAt[agent.name] = new Date(Date.now() - desiredMs).toISOString();
           }
         }
 
-        // 1) Appels
-        // Cas standard : statut logique "En call"
-        let inCall = (key === 'en_call');
+        // 1) Appels - UNIQUEMENT si ce n'est pas une AT
+        let inCall = false;
         let genesysSec = null;
-
-        // Cas particulier : "Tâche associée" avec un appel en cours
-        if (!inCall && key === 'tache') {
-          const tacheSec = extractTaskCallDurationFromRow(agent.rowElement);
-          if (tacheSec != null && tacheSec > 0) {
+        
+        // Seulement pour les statuts qui peuvent vraiment avoir des appels
+        // ET qui ne sont pas en AT
+        if (key !== 'tache' && key !== 'prohib') {
+          const isInteracting = agent.statusClass === 'On Call' || 
+                               agent.status.includes('En cours d\'interaction') ||
+                               agent.status.includes('En cours de communication');
+          
+          if (isInteracting) {
             inCall = true;
-            genesysSec = tacheSec;
+            genesysSec = extractCallDurationFromRow(agent.rowElement);
           }
-        }
-
-        if (inCall && genesysSec == null) {
-          // On essaie de resynchroniser avec la durée d'interaction affichée dans le widget
-          genesysSec = extractCallDurationFromRow(agent.rowElement);
         }
 
         updateCallState(agent.name, inCall, genesysSec);
 
-        // 2) Chats (synchronisés avec les durées)
+        // 2) Chats
         let chatCount = 0;
         let chatDurSecs = [];
         if (key === 'en_chat') {
           chatDurSecs = extractChatDurationsFromAgentRow(agent.rowElement) || [];
           if (chatDurSecs.length) {
             chatCount = Math.min(2, chatDurSecs.length);
-          } else {
-            const explicitCnt = (agent.channel && agent.channel.chatCount) || 1;
-            chatCount = CONFIG.SHOW_CHAT_MULTIPLIER ? clamp(explicitCnt, 1, 5) : 1;
           }
         }
         updateChatState(agent.name, chatCount);
 
-        // Aligne les départs des timers sur les durées Genesys détectées
         if (chatDurSecs.length) {
           if (!Array.isArray(chatStartAt[agent.name])) chatStartAt[agent.name] = [];
           chatDurSecs.slice(0, chatCount).forEach((sec, i) => {
@@ -2092,7 +2108,6 @@
           });
         }
 
-        // 3) Mémorise le groupe
         lastGroup[agent.name] = key;
       });
 
