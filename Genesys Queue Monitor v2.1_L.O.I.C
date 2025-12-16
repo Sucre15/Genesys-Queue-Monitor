@@ -219,8 +219,8 @@
     if (classes.includes('break') || text.includes('pause')) return 'Break';
     if (classes.includes('meeting') || text.includes('réunion')) return 'Meeting';
     if (classes.includes('training') || text.includes('formation')) return 'Training';
-    if (classes.includes('available') || text.includes('disponible')) return 'Available';
-    if (classes.includes('away') || text.includes('absent')) return 'Away';
+    if (text.includes('available') || text.includes('disponible')) return 'Available';
+    if (text.includes('away') || text.includes('absent')) return 'Away';
     if (classes.includes('on_queue') || classes.includes('on-queue') ||
         text.includes('file d\'attente') || text.includes('en file') || text.includes('queue'))
       return 'On Queue';
@@ -229,7 +229,7 @@
     // NOUVEAU : Hors ligne détecté
     if (classes.includes('offline') || text.includes('hors ligne') || text.includes('déconnecté'))
       return 'Offline';
-    if (classes.includes('idle') || text.includes('non occupé') || text.includes('inactif'))
+    if (text.includes('non occupé') || text.includes('inactif') || text.includes('idle'))
       return 'Idle';
     if (text.includes('sans réponse') || text.includes('not responding'))
       return 'Not Responding';
@@ -681,7 +681,7 @@
     return agents;
   }
 
-  // ===================== MAPPAGE STATUT → SECTION =====================
+  // ===================== MAPPAGE STATUT → SECTION (CORRIGÉ) =====================
   function deriveStatusKey(agent) {
     const raw = agent.status || agent.statusClass || '';
     const st = raw.toLowerCase();
@@ -710,6 +710,10 @@
     // CORRECTION : "Occupé" va dans la nouvelle section
     if (st.includes('occupé') || st.includes('busy')) return 'occupe';
 
+    // CORRECTION IMPORTANTE : "Non occupé" va dans "En file d'attente"
+    if (st.includes('non occupé') || st.includes('inactif') || st.includes('idle'))
+      return 'queue_free';
+
     if (
       st.includes('non télé') || st.includes('non-télé') ||
       noacc.includes('non telecontact') || noacc.includes('non-telecontact') ||
@@ -737,7 +741,6 @@
     // Disponibles / interactions hors file
     if (!onQ && cnt > 0) return 'interaction_hf';
     if (!onQ && (st.includes('available') || st.includes('disponible'))) return 'disponible';
-    if (st.includes('non occupé') || st.includes('inactif') || st.includes('idle')) return 'disponible';
 
     return 'autre';
   }
