@@ -711,6 +711,7 @@
     if (st.includes('occupé') || st.includes('busy')) return 'occupe';
 
     // CORRECTION IMPORTANTE : "Non occupé" va dans "En file d'attente"
+    // Cette condition doit être AVANT "disponible" mais APRÈS les statuts prioritaires
     if (st.includes('non occupé') || st.includes('inactif') || st.includes('idle'))
       return 'queue_free';
 
