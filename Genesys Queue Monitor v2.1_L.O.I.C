@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Genesys Queue Monitor (v2.2 - Dashboard Widget)
+// @name         Genesys Queue Monitor (v2.3 - Dashboard Widget)
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  Dashboard flottant Genesys Cloud basé sur le widget AGENT_STATUS
 // @author       Miloud Mostefa-Hanchour
 // @match        https://apps.mypurecloud.de/*
